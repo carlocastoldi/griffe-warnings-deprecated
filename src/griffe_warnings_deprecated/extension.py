@@ -6,7 +6,7 @@ import ast
 from collections.abc import Sequence
 from typing import Any
 
-from griffe import Class, Docstring, DocstringSectionAdmonition, Expr, ExprCall, ExprKeyword, ExprList, Extension, Function, get_logger
+from griffe import Class, Docstring, DocstringSectionAdmonition, DocstringSectionParameters, Expr, ExprCall, ExprDict, ExprKeyword, Extension, Function, Parameter, get_logger
 
 logger = get_logger(__name__)
 self_namespace = "griffe_warnings_deprecated"
@@ -27,6 +27,43 @@ def _remove_common_anchestors(package_path: str, other_anchestry: list[str]):
     common = [a1 for a1,a2 in zip(anchestry,other_anchestry) if a1==a2]
     return ".".join(anchestry[len(common):])
 
+def _deprecate_param(since: str, alternative: str|None) -> str:
+    message = f"""**Deprecated since {since}**"""
+    if alternative:
+        return message+f": use `{alternative}` instead.\n\n"
+    return message+"\n\n"
+
+def _braian_deprecate_params(obj: Function) -> dict[str,str]:
+    since = None
+    params = []
+    alternatives = dict()
+    for decorator in obj.decorators:
+        if decorator.callable_path not in _decorators or not isinstance(decorator.value, ExprCall):
+            continue
+        for arg in decorator.value:
+            if not isinstance(arg, ExprKeyword):
+                continue
+            try:
+                match arg.name:
+                    case "since":
+                        since = ast.literal_eval(arg.value)
+                    case "params":
+                        if isinstance(arg, ExprKeyword):
+                            params = [ast.literal_eval(e) for e in arg.value.elements]
+                    case "alternatives": # ExprCall | ExprDict
+                        if isinstance(arg.value, ExprCall) and arg.value.function.name == "dict":
+                            alternatives = {e.name: ast.literal_eval(e.value)
+                                            for e in arg.value.arguments if isinstance(e, ExprKeyword)}
+                        elif isinstance(arg.value, ExprDict):
+                            alternatives = dict(zip(map(ast.literal_eval, arg.value.keys),
+                                                    map(ast.literal_eval, arg.value.values)))
+            except ValueError:
+                pass
+        if since is None:
+            logger.debug(f"No static string or 'since=<string>' keyword found for '{obj.name}'")
+            return dict()
+    return {p: _deprecate_param(since, alternatives.get(p)) for p in params}
+
 def _deprecated_braian(obj: Class | Function, kwargs: Sequence[Expr]) -> str | None:
     message = None
     since = None
@@ -34,24 +71,18 @@ def _deprecated_braian(obj: Class | Function, kwargs: Sequence[Expr]) -> str | N
     for arg in kwargs:
         if not isinstance(arg, ExprKeyword):
             continue
-        match arg.name:
-            case "message":
-                try:
+        try:
+            match arg.name:
+                case "message":
                     message =  ast.literal_eval(arg.value)
-                except ValueError:
-                    pass
-            case "since":
-                try:
+                case "since":
                     since = ast.literal_eval(arg.value)
-                except ValueError:
-                    pass
-            case "alternatives": # ExprList
-                try:
+                case "alternatives": # ExprList
                     alternatives = [ast.literal_eval(e) for e in arg.value.elements]
-                except ValueError:
-                    pass
+        except ValueError:
+            pass
     if since is None:
-        logger.debug("No static string or 'since=<string>' keyword found")
+        logger.debug(f"No static string or 'since=<string>' keyword found for '{obj.name}'")
         return None
     text = f"`{obj.name}` is deprecated since {since} and may be removed in future versions."
     if message is not None:
@@ -73,13 +104,12 @@ def _deprecated(obj: Class | Function) -> str | None:
             return _deprecated_braian(obj, decorator.value)
     return None
 
-
 class WarningsDeprecatedExtension(Extension):
     """Griffe extension for `@warnings.deprecated` (PEP 702)."""
 
     def __init__(
         self,
-        kind: str = "danger",
+        kind: str = "deprecated",
         title: str | None = "Deprecated",
         label: str | None = "deprecated",
     ) -> None:
@@ -104,6 +134,21 @@ class WarningsDeprecatedExtension(Extension):
         sections = obj.docstring.parsed
         sections.insert(0, DocstringSectionAdmonition(kind=self.kind, text=message, title=title))
 
+    def _insert_message_on_param(self, fun: Function, param: Parameter, message: str) -> None:
+        if not fun.docstring:
+            # docs = "Parameters\n----------\n"
+            # docs +="    \n".join([p.name for p in fun.parameters])
+            # if fun.returns:
+            #     docs+"\nReturns\n-------\n    :\n"
+            # fun.docstring = Docstring(docs, parent=fun)
+            return # didn't manage to add default docstring for functions with params
+        sections = fun.docstring.parsed
+        for section in sections:
+            if isinstance(section, DocstringSectionParameters):
+                for p in section.value: # DocstringParameter
+                    if p.name == param.name:
+                        p.description = message+p.description
+
     def on_class_instance(self, *, cls: Class, **kwargs: Any) -> None:  # noqa: ARG002
         """Add section to docstrings of deprecated classes."""
         if message := _deprecated(cls):
@@ -114,7 +159,11 @@ class WarningsDeprecatedExtension(Extension):
 
     def on_function_instance(self, *, func: Function, **kwargs: Any) -> None:  # noqa: ARG002
         """Add section to docstrings of deprecated functions."""
-        if message := _deprecated(func):
+        if deprecated_params := _braian_deprecate_params(func):
+            for param in func.parameters:
+                if param.name in deprecated_params:
+                    self._insert_message_on_param(func, param, deprecated_params[param.name])
+        elif message := _deprecated(func):
             func.deprecated = message
             self._insert_message(func, message)
             if self.label:
