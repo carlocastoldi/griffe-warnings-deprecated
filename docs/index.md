@@ -1,4 +1,5 @@
 ---
+title: Overview
 hide:
 - feedback
 ---
@@ -11,8 +12,8 @@ hide:
 
 Given the following code:
 
-```python exec="1" result="python"
-print('--8<-- "docs/examples/normal.py"')
+```python
+--8<-- "examples/normal.py"
 ```
 
 And this *mkdocstrings* configuration:
@@ -34,8 +35,8 @@ Here is the rendered HTML:  <!-- markdown-exec: hide -->
 
 Given the following code:
 
-```python exec="1" result="python"
-print('--8<-- "docs/examples/notitle.py"')
+```python
+--8<-- "examples/notitle.py"
 ```
 
 And this *mkdocstrings* configuration:
